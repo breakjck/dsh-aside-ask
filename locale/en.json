@@ -1,0 +1,7 @@
+{
+  "meta": {
+    "title": "Side ask",
+    "description": "Select a passage in the conversation, right-click, and ask one small question. A side conversation answers it without interrupting the main one.",
+    "detail": "docs/DETAIL.md"
+  }
+}
