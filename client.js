@@ -47,7 +47,7 @@ window.__ModuleLoader__.load({
 
     const POSITION_KEY = 'dsh-aside-ask:position-v2'
     /** Shown in the header tooltip, so a stale bundle is obvious at a glance. */
-    const VERSION = '0.2.1'
+    const VERSION = '0.2.2'
     /** Gap kept between the stack and the viewport edges while dragging. */
     const EDGE = 8
     /** Size of the default bottom-right anchor. */
@@ -78,6 +78,27 @@ window.__ModuleLoader__.load({
         if (position === null) window.localStorage.removeItem(POSITION_KEY)
         else window.localStorage.setItem(POSITION_KEY, JSON.stringify(position))
       } catch { /* storage may be unavailable */ }
+    }
+
+    /** Bounded breadcrumb trail, readable from the renderer's localStorage. */
+    const TRACE_KEY = 'dsh-aside-ask:trace'
+    const TRACE_LIMIT = 40
+
+    /**
+     * Record one step of the ask flow. Diagnostics only: it must never throw or
+     * grow without bound, and it is the only way to see this state from outside
+     * the running app.
+     * @param event - Step name.
+     * @param detail - Optional small payload.
+     */
+    function trace(event, detail) {
+      try {
+        const line = `${new Date().toISOString()} ${event}${detail === undefined ? '' : ` ${JSON.stringify(detail)}`}`
+        const previous = window.localStorage.getItem(TRACE_KEY)
+        const lines = previous === null || previous === '' ? [] : previous.split('\n')
+        lines.push(line)
+        window.localStorage.setItem(TRACE_KEY, lines.slice(-TRACE_LIMIT).join('\n'))
+      } catch { /* diagnostics must never break the UI */ }
     }
 
     /**
@@ -136,6 +157,7 @@ window.__ModuleLoader__.load({
       },
       open(sessionId, quote) {
         store.composer = { sessionId, quote, key: nextKey() }
+        trace('composer.open', { key: store.composer.key })
         store.notify()
       },
       close() {
@@ -156,6 +178,7 @@ window.__ModuleLoader__.load({
       },
       async ask(sessionId, quote, question) {
         const id = nextKey()
+        trace('ask.start', { id, chars: question.length })
         store.items = [...store.items, { id, quote, question, status: 'asking', text: '', error: '' }].slice(-8)
         store.composer = null
         store.notify()
@@ -171,6 +194,7 @@ window.__ModuleLoader__.load({
               const payload = await response.json()
               if (typeof payload?.error?.message === 'string') message = payload.error.message
             } catch { /* the body was not JSON */ }
+            trace('ask.http', { status: response.status, message })
             store.patch(id, { status: 'error', error: message })
             return
           }
@@ -200,6 +224,7 @@ window.__ModuleLoader__.load({
               : { status: 'done' })
           }
         } catch (error) {
+          trace('ask.threw', { message: error instanceof Error ? error.message : String(error) })
           store.patch(id, {
             status: 'error',
             error: error instanceof Error ? error.message : String(error),
@@ -223,8 +248,10 @@ window.__ModuleLoader__.load({
         return
       }
       if (event?.type === 'done' && typeof event.text === 'string') {
+        trace('ask.done', { chars: event.text.length })
         store.patch(id, { status: 'done', text: event.text })
       } else if (event?.type === 'error') {
+        trace('ask.error', { message: typeof event.message === 'string' ? event.message : '' })
         store.patch(id, { status: 'error', error: typeof event.message === 'string' ? event.message : '' })
       }
     }
@@ -379,6 +406,21 @@ window.__ModuleLoader__.load({
       color: 'var(--dsw-alias-text-primary, #1f2328)',
     }
 
+    /**
+     * Scrollable holder for the finished side conversations. The stack is
+     * height-capped, and its bottom edge is pinned, so without this the cards
+     * would push the composer below the viewport once a few answers pile up —
+     * which reads as "the window disappeared after one answer".
+     */
+    const cardsWrap = {
+      display: 'flex',
+      flexDirection: 'column',
+      gap: '8px',
+      minHeight: 0,
+      overflowY: 'auto',
+      pointerEvents: 'none',
+    }
+
     /** Header row shared by every panel; it doubles as the drag handle. */
     const headerStyle = {
       display: 'flex',
@@ -475,7 +517,10 @@ window.__ModuleLoader__.load({
         }
       }
 
-      return h('div', { style: { ...panel, gap: '6px' } },
+      return h('div', {
+        style: { ...panel, gap: '6px', flex: '0 0 auto' },
+        'data-aside-ask': 'composer',
+      },
         h('div', {
           ...headerProps(drag),
           title: `${t('title')} v${VERSION} — ${t('drag.hint')}`,
@@ -546,7 +591,10 @@ window.__ModuleLoader__.load({
             item.error === '' ? t('status.failed') : `${t('status.failed')}：${item.error}`)
           : h('div', { style: { whiteSpace: 'pre-wrap', wordBreak: 'break-word' } }, item.text)
 
-      return h('div', { style: { ...panel, maxHeight: 'none' } },
+      return h('div', {
+        style: { ...panel, maxHeight: 'none', flex: '0 0 auto' },
+        'data-aside-ask': 'card',
+      },
         h('div', {
           ...headerProps(drag),
           title: `${t('title')} v${VERSION} — ${t('drag.hint')}`,
@@ -618,15 +666,42 @@ window.__ModuleLoader__.load({
         right: 'auto',
         bottom: 'auto',
       }
+      const cards = state.items.length === 0
+        ? null
+        : h('div', { style: cardsWrap, 'data-aside-ask': 'cards' },
+          state.items.map(item => h(Card, { key: item.id, item, t, drag })))
       return h('div', {
         ref: stackRef,
         style: placed,
         'data-aside-ask': 'stack',
         'data-aside-ask-version': VERSION,
       },
-        state.items.map(item => h(Card, { key: item.id, item, t, drag })),
+        cards,
         h(Composer, { t, drag }),
       )
+    }
+
+    /**
+     * Read the current document selection when the chat did not classify the
+     * right-click point as inside it — the same gesture, but the point landed a
+     * pixel outside the highlight. The selection still has to live inside a chat
+     * text source, so right-clicks anywhere else never open the composer.
+     * @returns the selected text, or null when there is nothing usable.
+     */
+    function selectionFallback() {
+      try {
+        const selection = document.getSelection()
+        if (selection === null || selection.isCollapsed) return null
+        const anchor = selection.anchorNode
+        const element = anchor === null
+          ? null
+          : anchor.nodeType === Node.ELEMENT_NODE ? anchor : anchor.parentElement
+        if (element === null || element.closest('[data-text-interaction-source]') === null) return null
+        const text = selection.toString().trim()
+        return text === '' ? null : text
+      } catch {
+        return null
+      }
     }
 
     return {
@@ -636,13 +711,18 @@ window.__ModuleLoader__.load({
         ctx.effect(() => ctx.uiConversation.interactions.register({
           id: 'aside-ask',
           onInteraction(request) {
-            if (request.trigger !== 'contextmenu' || !request.hasSelection) return
-            const text = request.readText()
-            if (text === null || text.trim() === '') return
+            if (request.trigger !== 'contextmenu') return
+            const quoted = (request.hasSelection ? request.readText() : null) ?? selectionFallback()
+            const length = quoted === null ? 0 : quoted.trim().length
+            trace('gesture', { hasSelection: request.hasSelection, length })
+            if (length === 0) return
             const binding = ctx.sessions.binding(request.sessionId)
-            if (binding === undefined) return
+            if (binding === undefined) {
+              trace('gesture.noBinding')
+              return
+            }
             request.preventDefault()
-            store.open(request.sessionId, text.trim())
+            store.open(request.sessionId, quoted.trim())
           },
         }), 'aside-ask: context menu interaction')
         ctx.slots.inject('shell.overlay', () => ctx.slots.register({
