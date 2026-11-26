@@ -1,6 +1,6 @@
 {
   "name": "dsh-aside-ask",
-  "version": "0.2.2",
+  "version": "0.3.0",
   "private": true,
   "description": "旁问：在对话记录里圈出一段，右键直接问一个小问题，答案走旁支子对话，不打断主对话。A DSH plugin for side-questions on selected text.",
   "type": "module",

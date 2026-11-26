@@ -18,6 +18,12 @@ const ROUTE = '/api/aside-ask'
 const QUOTE_LIMIT = 4000
 /** Characters of the side answer kept in the main conversation's notice. */
 const ANSWER_LIMIT = 4000
+/** Earlier rounds of the same aside thread carried into a follow-up prompt. */
+const HISTORY_LIMIT = 6
+/** Characters of one earlier question kept in a follow-up prompt. */
+const HISTORY_QUESTION_LIMIT = 400
+/** Characters of one earlier answer kept in a follow-up prompt. */
+const HISTORY_ANSWER_LIMIT = 1200
 
 export const name = 'dsh-aside-ask'
 export const inject = ['connection', 'subagents', 'agents']
@@ -80,6 +86,7 @@ async function handleAsk(ctx, notices, request) {
   const sessionId = typeof body?.sessionId === 'string' ? body.sessionId : ''
   const question = typeof body?.question === 'string' ? body.question.trim() : ''
   const quote = typeof body?.quote === 'string' ? body.quote.trim() : ''
+  const history = readHistory(body?.history)
   if (sessionId === '' || question === '') {
     return json({ error: { message: '缺少会话或问题' } }, 400)
   }
@@ -109,7 +116,7 @@ async function handleAsk(ctx, notices, request) {
       }
 
       try {
-        const activation = await startActivation(ctx, agent, question, quote, abort.signal)
+        const activation = await startActivation(ctx, agent, question, quote, history, abort.signal)
         send({ type: 'started', childId: String(activation.childId) })
         const result = await activation.result
         const answer = blocksToText(result.output).trim()
@@ -149,13 +156,14 @@ async function handleAsk(ctx, notices, request) {
  * @param agent - The parent conversation's live agent.
  * @param question - The user's small question.
  * @param quote - The passage the user quoted.
+ * @param history - Earlier rounds of the same thread, oldest first.
  * @param signal - Aborted when the browser drops the request.
  * @returns the activation handle.
  */
-async function startActivation(ctx, agent, question, quote, signal) {
+async function startActivation(ctx, agent, question, quote, history, signal) {
   const common = {
     label: `旁问：${truncate(question, 40)}`,
-    prompt: [{ type: 'text', text: promptText(quote, question) }],
+    prompt: [{ type: 'text', text: promptText(quote, question, history) }],
     parent: agent,
     signal,
     delivery: 'caller',
@@ -200,23 +208,51 @@ function queueNotice(notices, sessionId, quote, question, answer) {
 }
 
 /**
- * The child's instruction: answer only the small question.
+ * Read and bound the earlier rounds a follow-up carries.
+ * @param value - The request's `history` field, of unknown shape.
+ * @returns the accepted rounds, oldest first.
+ */
+function readHistory(value) {
+  if (!Array.isArray(value)) return []
+  const rounds = []
+  for (const item of value.slice(-HISTORY_LIMIT)) {
+    const question = typeof item?.question === 'string' ? item.question.trim() : ''
+    const answer = typeof item?.answer === 'string' ? item.answer.trim() : ''
+    if (question !== '' && answer !== '') rounds.push({ question, answer })
+  }
+  return rounds
+}
+
+/**
+ * The child's instruction: answer the question, in the context of the earlier
+ * rounds of this side thread and of the passage it is about.
  * @param quote - The quoted passage.
- * @param question - The small question.
+ * @param question - The user's question.
+ * @param history - Earlier rounds of the same thread, oldest first.
  * @returns the child's first user message.
  */
-function promptText(quote, question) {
-  return [
-    '你是主对话的「旁问」执行者：只回答用户就下面这段内容提的一个小问题。',
-    '要求：直接回答这个问题本身，通常 1–4 句；不要续写主任务，不要复述已知上下文，不要反问；',
-    '除非确实必要，不要调用工具。',
+function promptText(quote, question, history) {
+  const lines = [
+    '你是主对话的「旁问」执行者：只回答用户就下面这段内容提的问题。',
+    '要求：直接回答这个问题本身，通常 1–4 句；不要续写主任务，不要反问；除非确实必要，不要调用工具。',
     '',
     '【用户圈出的内容】',
     truncate(quote, QUOTE_LIMIT),
-    '',
-    '【用户的问题】',
-    question,
-  ].join('\n')
+  ]
+  if (history.length > 0) {
+    lines.push('', '【这个旁问窗口里已经聊过的】')
+    for (const [index, round] of history.entries()) {
+      lines.push(`第 ${index + 1} 问：${truncate(round.question, HISTORY_QUESTION_LIMIT)}`)
+      lines.push(`第 ${index + 1} 答：${truncate(round.answer, HISTORY_ANSWER_LIMIT)}`)
+    }
+    lines.push(
+      '',
+      '用户这次的问题承接上面这些问答（例如“那第二个呢”指的是上文提到过的第二件事）；',
+      '据此作答，不要重复已经答过的内容，也不要重新介绍背景。',
+    )
+  }
+  lines.push('', '【用户这次的问题】', question)
+  return lines.join('\n')
 }
 
 /**

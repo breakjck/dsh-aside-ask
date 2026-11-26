@@ -8,12 +8,12 @@
 2. 在选中的文字上**右键**。
 3. 右下角弹出旁问框，里面是圈出的那段话和一个输入框。
 4. 输入问题，`Ctrl+Enter` 或点「问」。
-5. 答案在右下角的卡片里出现；点「复制」可以拿走。
+5. 答案在窗口里出现，输入框留在原处，可以直接问下一句；同一个窗口里的多轮问答按顺序累积，超出高度就在窗口里滚动，点每条答案右上角的 ⧉ 可以复制。
 6. 挡着内容就**按住标题行拖动**（最左边有个 `⠿`，鼠标移上去会变成抓手）；双击标题行回到右下角。位置会被记住。
 
 主对话不受影响：不新增轮次、不打断正在跑的任务、不会因为你在旁边问一句就换个话题。
 
-可以连着问：答完一张卡片，直接再去圈下一段右键就行。答案卡片往上堆叠，超过整栈高度上限后在卡片区内部滚动，输入框始终留在窗口里。
+追问不需要再右键：答案出来后窗口不关、输入框不消失，直接接着问。同一个窗口里的多轮问答按顺序累积（上面的历史不会被清空），超出高度时窗口内部滚动，输入框固定在底部。右键圈一段**新的**文字会在这个窗口里另起一段引文，旧的那段留在上方。
 
 ## 排错
 
@@ -23,7 +23,7 @@
 localStorage.getItem('dsh-aside-ask:trace')
 ```
 
-事件含义：`gesture`（右键有没有被接管、圈到多少字）、`composer.open`（框有没有真的打开）、`ask.start`、`ask.done` / `ask.http` / `ask.error` / `ask.threw`（请求走到哪一步、为什么失败）。
+事件含义：`gesture`（右键有没有被接管、圈到多少字）、`thread.open` / `thread.reuse`（窗口开/复用）、`ask.start`（带 `history` 条数）、`ask.done` / `ask.http` / `ask.error` / `ask.threw`（请求走到哪一步、为什么失败）、`window.close`。
 
 ## 旁问算不算"问过"
 
@@ -45,6 +45,7 @@ localStorage.getItem('dsh-aside-ask:trace')
 - **旁支从哪来**：`ctx.subagents.startActivation({ provider: 'fork', delivery: 'caller' })`。fork provider 用主会话已完成的轮次前缀给子会话播种，所以旁支天然知道你们刚才在聊什么，只回答那一小问；没有 fork provider 时退回 `spawn`（全新子会话，只有圈出的内容和问题）。
 - **为什么是 `delivery: 'caller'`**：`delivery: 'parent'` 会在结算后向主会话追加一条完成通知，**到达空闲主会话时会触发一次独立模型请求**——主 agent 会开口说话，正是要避免的事。`caller` 只把结果交回调用方。
 - **为什么走 pre-step 而不是 `agent.inject`**：预注入要求主会话此刻有活着的 agent，且只在下一次 pre-step 生效；`agent/pre-step` 钩子对任何后续恢复的会话都成立，主会话关掉再开也照样能收到记录。
+- **追问怎么承接上下文**：客户端把同一段引文下前几轮（最多 6 轮）的「问 + 答」原文放进请求的 `history`，宿主把它写进旁支的提示词，并注明“这次的问题承接上面这些问答”。限制：每一轮仍是新起一条 fork 旁支（继承主对话已完成的轮次 + 这些问答），不是同一条子会话续聊，旁支的思考过程与工具调用不会传给下一轮。
 - **客户端怎么知道**：`ctx.uiConversation.interactions.register({ id: 'aside-ask', onInteraction })` 接管 `contextmenu` 手势。DSH 在标记了 `data-text-interaction-source` 的节点上检测手势，右键点必须落在选区的矩形内才算 `hasSelection`；此时 `request.readText()` 给出选中的文字，`request.preventDefault()` 压掉浏览器原生菜单。
 - **UI 放哪**：`shell.overlay`（整帧浮层）。不放 `conversation.chat.text-interaction` 浮层——那个 surface 的尺寸被夹在可见区内、且跟着选区走，放不下输入框和答案；放进 chat 流里又会把主对话顶开。
 - **为什么能拖、又被什么框住**：`shell.overlay` 插槽会给每个浮层元素套一层容器，而那层容器**没有自己的盒子尺寸**（实测 `0x0`）。所以位置不能按父容器量——第一版就是这么错的：夹取用的 `frame.width/height ≈ 0`，位置被夹成左上角 `8,8`，表现为"一按下就跳走、之后拖不动"。现在改成 `position: fixed`，按**视口**（`window.innerWidth/innerHeight`）夹取，父容器与 `AppFrame` 的 `overflow:hidden` 都不再参与计算；拖动时把 `left/top` 直接写到节点上（不等 React 重渲染，避免挂起的那次渲染把第一次移动覆盖回去），松手才提交进 store 并写 `localStorage`（键 `dsh-aside-ask:position-v2`）；指针监听从 `pointerdown` 时挂到 `window`（capture），不依赖 pointer capture，元素中途重挂也不会丢；窗口变高（来答案、换行）时用 `ResizeObserver` 重新按视口夹紧。

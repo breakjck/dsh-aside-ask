@@ -6,12 +6,12 @@
 
 对话进行到一半，看到一句想追问的话——直接问，主对话就被推向新话题了；不问，又怕漏掉。旁问给这种情况留一个出口：把那段话圈出来，在旁边问一句小的，问完继续原来的事。
 
-```
+``
 主对话 ────●──────────────────────●──────────
             │ 选中一段              │ 下次开口时带上
             └──● 旁支子对话 ──●     │ 一条折叠记录
                  （fork）   └── 答案 ┘
-```
+``
 
 ## 效果
 
@@ -20,9 +20,8 @@
 3. 右下角弹出旁问框：上面是圈出的那段话，下面一个输入框。
 4. 输入问题，`Ctrl+Enter`（macOS 上 `⌘+Enter`）或点「问」。
 5. 答案出现在右下角的卡片里，可以复制、可以单条关掉。
-6. 觉得它挡着内容，就**按住标题栏拖走**（框和卡片都能拖，左边有个 `⠿` 握把）。双击标题栏回到右下角。
-
-可以连着问：答完一张卡片，直接再去圈下一段右键就行，卡片会往上堆，超出的部分在卡片区滚动，输入框永远留在可见的位置。
+6. 答案出来后**窗口不关、输入框也不消失**，直接在里面问下一句；同一个窗口里可以一轮轮追问，历史按顺序留在上面，超出高度就在窗口里滚动，输入框始终可见。
+7. 觉得它挡着内容，就**按住标题栏拖走**（左边有个 `⠿` 握把）。双击标题栏回到右下角。
 
 拖过的位置会记住，关掉再开、刷新页面都还在；拖动被限制在窗口里面，不会被拖到看不见的地方。
 
@@ -38,16 +37,20 @@
 | `delivery: 'caller'`，不是 `'parent'` | `'parent'` 会在旁支结算后向主会话追加完成通知，**到达空闲主会话时会触发一次独立模型请求**——主 agent 会开口说话 |
 | 回流走 `agent/pre-step` 钩子 | `agent.inject` 要求主会话此刻有活着的 agent，且只在下一轮 pre-step 生效；钩子对之后任何一次恢复的会话都成立 |
 
+### 追问承接什么
+
+同一个窗口里的追问，会把前面几轮的「问 + 答」原文带进旁支的提示词（最多 6 轮、每问 400 字、每答 1200 字），所以「那第二个呢」这种指代能接上；每一轮仍然是**新起一条 fork 旁支**，它继承的是主对话已完成的轮次，加上这些历史问答——不是同一条子会话在续聊，因此旁支内部的思考过程、工具调用过程不会带给下一轮。这是宿主接口的限制，写在已知限制里。
+
 答完之后，主对话**下一次真正发请求时**才会收到一条折叠记录（圈出的内容、问题、答案），追加进上下文、也能被 KV 缓存复用，但不会唤醒空闲的主 agent、不制造多余的一轮输出。记录长这样：
 
-```
+``
 [旁问] 用户在主对话里圈出一段内容，另开了一条旁支问了一个小问题，已经答完。
 这条只是记录：不必回应它，也不要据此改变当前任务；和正在做的事相关时可以作为参考。
 
 圈出的内容：……
 问题：……
 旁支回答：……
-```
+``
 
 细节见 [`docs/DETAIL.md`](docs/DETAIL.md)。
 
@@ -63,26 +66,26 @@
 
 **1) 克隆到你喜欢的位置**
 
-```powershell
+``powershell
 git clone https://github.com/breakjck/dsh-aside-ask.git
 cd dsh-aside-ask
-```
+``
 
 **2) 让 DSH 里安装这个 bundle**
 
 DSH 的插件管理走 agent 的 `plugin_manager`。新开一个会话，把下面这句连同你的实际路径粘给它：
 
-```text
+``text
 用 plugin_manager 把下面这个目录作为插件 bundle 安装：<你克隆下来的目录，例如 D:\code\dsh-aside-ask>
 （action 用 install_bundle，target 填这个绝对路径）
-```
+``
 
 装成功后应该看到类似输出：
 
-```
-+ dsh-aside-ask 0.2.2 <- D:\code\dsh-aside-ask
+``
++ dsh-aside-ask 0.3.0 <- D:\code\dsh-aside-ask
 {"stage":"enable","target":"dsh-aside-ask","enabled":true,"application":"applied"}
-```
+``
 
 **3) 刷新页面**
 
@@ -92,23 +95,23 @@ DSH 的插件管理走 agent 的 `plugin_manager`。新开一个会话，把下�
 
 让 agent 执行 `plugin_manager` 的 `list_plugins`，列表里应该有：
 
-```
+``
 id: include:aside-ask    moduleName: dsh-aside-ask    enabled: true    fiberPhase: active
-```
+``
 
 `fiberPhase` 是 `active` 才算真跑起来了。也可以看自检日志（Windows）：
 
-```powershell
+``powershell
 Get-Content "$env:TEMP\dsh-aside-ask-boot.log" -Tail 3
-```
+``
 
 出现 `aside-ask host applied (pid …)` 说明宿主半已加载、依赖服务都解析到了。
 
 ### 卸载
 
-```text
+``text
 用 plugin_manager 卸载 dsh-aside-ask（action 用 remove_bundle，target 用 dsh-aside-ask）
-```
+``
 
 卸完刷新一次页面。
 
@@ -126,11 +129,11 @@ Get-Content "$env:TEMP\dsh-aside-ask-boot.log" -Tail 3
 
 还是不对劲的话，插件会在浏览器存储里留一条诊断轨迹（只记最近 40 步，不往外发）：
 
-```js
+``js
 localStorage.getItem('dsh-aside-ask:trace')
-```
+``
 
-里面有 `gesture`（右键有没有被接管、圈到多少字）、`composer.open`（框有没有真的打开）、`ask.start` / `ask.done` / `ask.error`（请求走到哪一步）。
+里面有 `gesture`（右键有没有被接管、圈到多少字）、`thread.open` / `thread.reuse`（窗口开/复用）、`ask.start`（带 `history` 条数）、`ask.done` / `ask.http` / `ask.error` / `ask.threw`（请求走到哪一步、为什么失败）。
 
 ## 已知限制
 
@@ -138,6 +141,7 @@ localStorage.getItem('dsh-aside-ask:trace')
 - 旁问框活在 DSH 的覆盖层里，层级低于右侧抽屉（打开抽屉时会被遮罩盖住、暂时点不到）。把抽屉关掉就恢复。
 - 旁问记录在内存里。答完之后、主对话下一次开口之前如果重启了应用，这条记录会丢（旁支会话本身还在，可以继续）。
 - 旁支用主会话当前的模型与工具，成本大约是一次短对话。
+- 追问携带的是前几轮的问答原文，不是同一条子会话的续聊：旁支的思考过程与工具调用不会传给下一轮。
 - 同时最多 8 条旁支（受子代理 `maxActiveSubagents` 约束）。
 - 用到的 `agent/pre-step`、`ctx.connection.fetch`、`ctx.subagents` 是 DSH 的插件 API，DSH 大版本升级时可能变；升级后如果坏了，看上面的验证清单。
 

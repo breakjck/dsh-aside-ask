@@ -1,9 +1,11 @@
 /**
  * Client half of the 旁问 (aside-ask) bundle.
  *
- * A right-click on selected text in the chat opens a small frame-wide composer.
- * Asking runs one side conversation on the Host and streams its answer into a
- * card in the bottom-right corner, so the main conversation keeps its place.
+ * A right-click on selected text in the chat opens one small window. The window
+ * keeps the quoted passage, every question asked about it, and the answers in
+ * order, and it stays open after an answer so the next question can follow. The
+ * window is draggable by its header, remembers where it was dragged, and can be
+ * closed and reopened.
  */
 window.__ModuleLoader__.load({
   id: 'dsh-aside-ask',
@@ -14,47 +16,53 @@ window.__ModuleLoader__.load({
 
     const zh = {
       'title': '旁问',
-      'compose.quoted': '圈出的内容',
-      'compose.hint': '就这段问一个小问题…（Ctrl+Enter 发送）',
+      'drag.grip': '⠿',
+      'drag.hint': '按住这一行拖动 · 双击回到右下角',
       'action.ask': '问',
-      'action.cancel': '取消',
       'action.copy': '复制',
       'action.close': '关掉',
-      'status.asking': '旁支在想…',
+      'compose.quoted': '圈出的内容',
+      'compose.hint': '接着问…（Ctrl+Enter 发送）',
+      'compose.first': '就这段问一个小问题…（Ctrl+Enter 发送）',
+      'compose.recorded': '答完会记进主对话',
+      'status.asking': '旁支在想',
       'status.failed': '没答上来',
-      'note.recorded': '答完会在你下次开口时记进主对话',
-      'error.noSession': '这个会话现在不能旁问',
-      'error.network': '请求失败',
-      'drag.hint': '按住这一行拖动 · 双击回到右下角',
-      'drag.grip': '⠿',
+      'rounds.one': '1 轮',
+      'rounds.many': '{count} 轮',
+      'threads.one': '1 段引文',
+      'threads.many': '{count} 段引文',
     }
     const en = {
       'title': 'Side ask',
-      'compose.quoted': 'Quoted',
-      'compose.hint': 'Ask one small question about this… (Ctrl+Enter to send)',
+      'drag.grip': '⠿',
+      'drag.hint': 'Hold this row to drag · double-click to reset',
       'action.ask': 'Ask',
-      'action.cancel': 'Cancel',
       'action.copy': 'Copy',
       'action.close': 'Dismiss',
-      'status.asking': 'Asking…',
+      'compose.quoted': 'Quoted',
+      'compose.hint': 'Ask a follow-up… (Ctrl+Enter to send)',
+      'compose.first': 'Ask one small question about this… (Ctrl+Enter to send)',
+      'compose.recorded': 'Noted to the main conversation',
+      'status.asking': 'Thinking',
       'status.failed': 'No answer',
-      'note.recorded': 'Will be noted to the main conversation at your next turn',
-      'error.noSession': 'This conversation cannot be asked right now',
-      'error.network': 'Request failed',
-      'drag.hint': 'Hold this row to drag · double-click to reset',
-      'drag.grip': '⠿',
+      'rounds.one': '1 round',
+      'rounds.many': '{count} rounds',
+      'threads.one': '1 quote',
+      'threads.many': '{count} quotes',
     }
 
     const POSITION_KEY = 'dsh-aside-ask:position-v2'
     /** Shown in the header tooltip, so a stale bundle is obvious at a glance. */
-    const VERSION = '0.2.2'
-    /** Gap kept between the stack and the viewport edges while dragging. */
+    const VERSION = '0.3.0'
+    /** Gap kept between the window and the viewport edges while dragging. */
     const EDGE = 8
-    /** Size of the default bottom-right anchor. */
+    /** Default bottom-right anchor. */
     const ANCHOR = { right: '16px', bottom: '88px' }
+    /** Rounds sent to the host as follow-up context. */
+    const HISTORY_LIMIT = 6
 
     /**
-     * Read the remembered free position of the stack.
+     * Read the remembered free position of the window.
      * @returns the offset inside the viewport, or null for the default anchor.
      */
     function readPosition() {
@@ -103,8 +111,8 @@ window.__ModuleLoader__.load({
 
     /**
      * Read the current viewport box. The overlay slot may hand us a container
-     * with no box of its own, so the stack is bounded by the window instead of
-     * by its containing block.
+     * with no box of its own, so the window is bounded by the viewport instead
+     * of by its containing block.
      * @returns the viewport width and height.
      */
     function viewportBox() {
@@ -116,12 +124,12 @@ window.__ModuleLoader__.load({
     }
 
     /**
-     * Keep the stack inside the viewport so a drag can never strand it off
+     * Keep the window inside the viewport so a drag can never strand it off
      * screen or behind the shell's clipped frame.
      * @param left - Wanted distance from the viewport's left edge.
      * @param top - Wanted distance from the viewport's top edge.
-     * @param width - Stack width.
-     * @param height - Stack height.
+     * @param width - Window width.
+     * @param height - Window height.
      * @returns the clamped offset.
      */
     function clampToViewport(left, top, width, height) {
@@ -134,10 +142,20 @@ window.__ModuleLoader__.load({
       }
     }
 
-    /** Frame-wide state shared by the gesture handler and the overlay card. */
+    let counter = 0
+    /** @returns a fresh identity for a thread, round, or composer. */
+    function nextKey() {
+      counter += 1
+      return `${Date.now().toString(36)}-${counter}`
+    }
+
+    /**
+     * One thread per quoted passage; rounds accumulate under it in ask order.
+     * The newest thread is the one the composer writes to.
+     */
     const store = {
-      composer: null,
-      items: [],
+      sessionId: null,
+      threads: [],
       position: readPosition(),
       listeners: new Set(),
       subscribe(listener) {
@@ -147,46 +165,68 @@ window.__ModuleLoader__.load({
       notify() {
         for (const listener of [...store.listeners]) listener()
       },
-      /**
-       * @param position - New free position, or null to return to the anchor.
-       */
       setPosition(position) {
         store.position = position
         writePosition(position)
         store.notify()
       },
+      /**
+       * Open the window for a quoted passage. Re-quoting the newest passage
+       * keeps its thread (and its rounds) instead of stacking a duplicate.
+       * @param sessionId - Conversation the quote came from.
+       * @param quote - The selected text.
+       */
       open(sessionId, quote) {
-        store.composer = { sessionId, quote, key: nextKey() }
-        trace('composer.open', { key: store.composer.key })
+        const newest = store.threads[store.threads.length - 1]
+        if (newest !== undefined && newest.quote === quote && newest.sessionId === sessionId) {
+          trace('thread.reuse', { quote: quote.length })
+          store.sessionId = sessionId
+          store.notify()
+          return
+        }
+        const thread = { id: nextKey(), sessionId, quote, rounds: [] }
+        store.sessionId = sessionId
+        store.threads = [...store.threads, thread]
+        trace('thread.open', { quote: quote.length, threads: store.threads.length })
         store.notify()
       },
+      /** Dismiss the whole window; the threads are dropped with it. */
       close() {
-        if (store.composer === null) return
-        store.composer = null
+        if (store.threads.length === 0) return
+        trace('window.close', { threads: store.threads.length })
+        store.threads = []
         store.notify()
       },
-      dismissItem(id) {
-        store.items = store.items.filter(item => item.id !== id)
-        store.notify()
+      /** @returns the thread the composer writes to, or null. */
+      active() {
+        return store.threads.length === 0 ? null : store.threads[store.threads.length - 1]
       },
-      patch(id, change) {
-        store.items = store.items.map(item => (item.id === id ? { ...item, ...change } : item))
-        store.notify()
+      /** @returns whether any round is still waiting for its answer. */
+      busy() {
+        return store.threads.some(thread => thread.rounds.some(round => round.status === 'asking'))
       },
-      item(id) {
-        return store.items.find(item => item.id === id)
-      },
-      async ask(sessionId, quote, question) {
-        const id = nextKey()
-        trace('ask.start', { id, chars: question.length })
-        store.items = [...store.items, { id, quote, question, status: 'asking', text: '', error: '' }].slice(-8)
-        store.composer = null
+      /**
+       * Queue one question on a thread and stream its answer.
+       * @param threadId - Thread to append to.
+       * @param question - The user's question.
+       */
+      async ask(threadId, question) {
+        const thread = store.threads.find(item => item.id === threadId)
+        if (thread === undefined) return
+        const round = { id: nextKey(), question, status: 'asking', answer: '', error: '' }
+        const history = thread.rounds
+          .filter(item => item.status === 'done' && item.answer !== '')
+          .slice(-HISTORY_LIMIT)
+          .map(item => ({ question: item.question, answer: item.answer }))
+        thread.rounds = [...thread.rounds, round]
+        trace('ask.start', { round: round.id, chars: question.length, history: history.length })
         store.notify()
+
         try {
           const response = await fetch('api/aside-ask', {
             method: 'POST',
             headers: { 'content-type': 'application/json' },
-            body: JSON.stringify({ sessionId, question, quote }),
+            body: JSON.stringify({ sessionId: thread.sessionId, quote: thread.quote, question, history }),
           })
           if (!response.ok) {
             let message = `${response.status}`
@@ -195,14 +235,14 @@ window.__ModuleLoader__.load({
               if (typeof payload?.error?.message === 'string') message = payload.error.message
             } catch { /* the body was not JSON */ }
             trace('ask.http', { status: response.status, message })
-            store.patch(id, { status: 'error', error: message })
+            store.settle(round.id, { status: 'error', error: message })
             return
           }
           const reader = response.body !== null && typeof response.body?.getReader === 'function'
             ? response.body.getReader()
             : null
           if (reader === null) {
-            for (const line of (await response.text()).split('\n')) consume(id, line)
+            for (const line of (await response.text()).split('\n')) consume(round.id, line)
           } else {
             const decoder = new TextDecoder()
             let buffer = ''
@@ -212,30 +252,50 @@ window.__ModuleLoader__.load({
               buffer += decoder.decode(value, { stream: true })
               const lines = buffer.split('\n')
               buffer = lines.pop() ?? ''
-              for (const line of lines) consume(id, line)
+              for (const line of lines) consume(round.id, line)
             }
             buffer += decoder.decode()
-            if (buffer.trim() !== '') consume(id, buffer)
+            if (buffer.trim() !== '') consume(round.id, buffer)
           }
-          const settled = store.item(id)
+          const settled = store.round(round.id)
           if (settled !== undefined && settled.status === 'asking') {
-            store.patch(id, settled.text === ''
+            store.settle(round.id, settled.answer === ''
               ? { status: 'error', error: '' }
               : { status: 'done' })
           }
         } catch (error) {
-          trace('ask.threw', { message: error instanceof Error ? error.message : String(error) })
-          store.patch(id, {
-            status: 'error',
-            error: error instanceof Error ? error.message : String(error),
-          })
+          const message = error instanceof Error ? error.message : String(error)
+          trace('ask.threw', { message })
+          store.settle(round.id, { status: 'error', error: message })
+        }
+      },
+      /** @param id - Round identity. @returns that round, if still present. */
+      round(id) {
+        for (const thread of store.threads) {
+          const found = thread.rounds.find(item => item.id === id)
+          if (found !== undefined) return found
+        }
+        return undefined
+      },
+      /**
+       * Apply one settled state to a round.
+       * @param id - Round identity.
+       * @param change - Fields to merge.
+       */
+      settle(id, change) {
+        for (const thread of store.threads) {
+          const index = thread.rounds.findIndex(item => item.id === id)
+          if (index < 0) continue
+          thread.rounds = thread.rounds.map((item, at) => (at === index ? { ...item, ...change } : item))
+          store.notify()
+          return
         }
       },
     }
 
     /**
-     * Apply one newline-delimited event to a card.
-     * @param id - Card identity.
+     * Apply one newline-delimited event to a round.
+     * @param id - Round identity.
      * @param line - One JSON event line.
      */
     function consume(id, line) {
@@ -249,17 +309,12 @@ window.__ModuleLoader__.load({
       }
       if (event?.type === 'done' && typeof event.text === 'string') {
         trace('ask.done', { chars: event.text.length })
-        store.patch(id, { status: 'done', text: event.text })
+        store.settle(id, { status: 'done', answer: event.text })
       } else if (event?.type === 'error') {
-        trace('ask.error', { message: typeof event.message === 'string' ? event.message : '' })
-        store.patch(id, { status: 'error', error: typeof event.message === 'string' ? event.message : '' })
+        const message = typeof event.message === 'string' ? event.message : ''
+        trace('ask.error', { message })
+        store.settle(id, { status: 'error', error: message })
       }
-    }
-
-    let counter = 0
-    function nextKey() {
-      counter += 1
-      return `${Date.now().toString(36)}-${counter}`
     }
 
     /**
@@ -272,13 +327,12 @@ window.__ModuleLoader__.load({
     }
 
     /**
-     * Pointer-driven repositioning of the stack. The stack is `fixed`, so it
+     * Pointer-driven repositioning of the window. The window is `fixed`, so it
      * follows the pointer in viewport coordinates no matter which box the
      * overlay slot hands us. Moves are written straight to the node — no React
-     * render runs in between, which used to clobber the first move — and the
-     * settled offset is committed to the store on release.
-     * @param stackRef - The stack element.
-     * @returns the props to spread on a panel header.
+     * render runs in between — and the settled offset is committed on release.
+     * @param stackRef - The window element.
+     * @returns the props to spread on the window header.
      */
     function useDrag(stackRef) {
       const cleanupRef = React.useRef(null)
@@ -299,10 +353,7 @@ window.__ModuleLoader__.load({
         el.style.top = `${start.top}px`
         el.style.right = 'auto'
         el.style.bottom = 'auto'
-        el.style.cursor = 'grabbing'
         el.setAttribute('data-aside-ask-dragging', '')
-        // Take the drag away from any live selection so the pointer stream
-        // stays ours for the whole gesture.
         try { window.getSelection()?.removeAllRanges() } catch { /* selection unavailable */ }
 
         const drag = {
@@ -339,10 +390,7 @@ window.__ModuleLoader__.load({
           window.removeEventListener('blur', finish)
           if (cleanupRef.current === finish) cleanupRef.current = null
           const node = stackRef.current
-          if (node !== null) {
-            node.style.cursor = ''
-            node.removeAttribute('data-aside-ask-dragging')
-          }
+          if (node !== null) node.removeAttribute('data-aside-ask-dragging')
           store.setPosition(drag.next)
         }
 
@@ -354,7 +402,7 @@ window.__ModuleLoader__.load({
         event.preventDefault()
       }
 
-      /** Double-clicking a header parks the stack back in the corner. */
+      /** Double-clicking the header parks the window back in the corner. */
       const reset = (event) => {
         if (event !== undefined) event.preventDefault()
         if (cleanupRef.current !== null) cleanupRef.current()
@@ -375,196 +423,332 @@ window.__ModuleLoader__.load({
       }
     }
 
-    /**
-     * @param drag - Result of {@link useDrag}.
-     * @returns props for a panel header row.
-     */
-    function headerProps(drag) {
-      return {
-        ...drag.handleProps,
-        style: { ...headerStyle, ...drag.handleProps.style },
-      }
-    }
-
-    /**
-     * The stack itself. It starts anchored to the bottom-right corner and is
-     * `fixed`, so a dragged `left`/`top` is measured against the viewport and
-     * never depends on the containing block the overlay slot creates.
-     */
-    const card = {
+    /** Window itself: one panel that keeps its shape while rounds accumulate. */
+    const stackStyle = {
       position: 'fixed',
       right: ANCHOR.right,
       bottom: ANCHOR.bottom,
       zIndex: 60,
       display: 'flex',
       flexDirection: 'column',
-      gap: '8px',
-      width: 'min(380px, calc(100vw - 32px))',
-      maxHeight: 'min(64vh, 520px)',
-      pointerEvents: 'none',
-      font: 'var(--dsw-font-xs-13, 13px/1.55 system-ui, -apple-system, "Segoe UI", sans-serif)',
+      width: 'min(400px, calc(100vw - 32px))',
+      maxHeight: 'min(68vh, 560px)',
+      borderRadius: '14px',
+      border: '1px solid var(--dsw-alias-border-l2, rgba(15, 23, 42, 0.14))',
+      background: 'var(--dsw-alias-bg-elevated, var(--dsw-alias-button-floating-fill, #ffffff))',
+      boxShadow: 'var(--dsw-elevation-panel, 0 12px 32px rgba(15, 23, 42, 0.22))',
+      overflow: 'hidden',
+      pointerEvents: 'auto',
+      font: 'var(--dsw-font-xs-13, 13px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif)',
       color: 'var(--dsw-alias-text-primary, #1f2328)',
     }
 
-    /**
-     * Scrollable holder for the finished side conversations. The stack is
-     * height-capped, and its bottom edge is pinned, so without this the cards
-     * would push the composer below the viewport once a few answers pile up —
-     * which reads as "the window disappeared after one answer".
-     */
-    const cardsWrap = {
-      display: 'flex',
-      flexDirection: 'column',
-      gap: '8px',
-      minHeight: 0,
-      overflowY: 'auto',
-      pointerEvents: 'none',
-    }
-
-    /** Header row shared by every panel; it doubles as the drag handle. */
     const headerStyle = {
       display: 'flex',
       alignItems: 'center',
       gap: '8px',
-      minHeight: '18px',
+      flex: '0 0 auto',
+      padding: '9px 10px 9px 12px',
+      borderBottom: '1px solid var(--dsw-alias-border-subtle, rgba(15, 23, 42, 0.08))',
+      background: 'var(--dsw-alias-bg-raised, transparent)',
     }
 
-    const panel = {
+    const bodyStyle = {
+      flex: '1 1 auto',
+      minHeight: 0,
+      overflowY: 'auto',
+      display: 'flex',
+      flexDirection: 'column',
+      gap: '12px',
+      padding: '10px 12px',
+      overscrollBehavior: 'contain',
+    }
+
+    const composerStyle = {
+      flex: '0 0 auto',
+      display: 'flex',
+      flexDirection: 'column',
+      gap: '6px',
+      padding: '9px 10px 10px',
+      borderTop: '1px solid var(--dsw-alias-border-subtle, rgba(15, 23, 42, 0.08))',
+      background: 'var(--dsw-alias-bg-raised, transparent)',
+    }
+
+    const threadStyle = {
       display: 'flex',
       flexDirection: 'column',
       gap: '8px',
-      padding: '10px 12px',
-      borderRadius: '12px',
-      border: '1px solid var(--dsw-alias-border-subtle, rgba(15, 23, 42, 0.12))',
-      background: 'var(--dsw-alias-bg-raised, var(--dsw-alias-button-floating-fill, #ffffff))',
-      boxShadow: 'var(--dsw-elevation-panel, 0 8px 28px rgba(15, 23, 42, 0.18))',
-      overflowY: 'auto',
-      pointerEvents: 'auto',
     }
 
     const quoteStyle = {
       margin: 0,
-      padding: '6px 8px',
+      padding: '6px 9px',
       borderRadius: '8px',
-      borderLeft: '3px solid var(--dsw-alias-accent, #3b6ef6)',
+      borderLeft: '2px solid var(--dsw-alias-accent, #3b6ef6)',
       background: 'var(--dsw-alias-bg-sunken, rgba(15, 23, 42, 0.045))',
       color: 'var(--dsw-alias-text-secondary, #4a5260)',
+      fontSize: '12px',
+      lineHeight: 1.5,
       display: '-webkit-box',
-      WebkitLineClamp: 3,
+      WebkitLineClamp: 2,
       WebkitBoxOrient: 'vertical',
       overflow: 'hidden',
       wordBreak: 'break-word',
     }
 
-    const buttonStyle = {
+    const roundStyle = {
+      display: 'flex',
+      flexDirection: 'column',
+      gap: '6px',
+      padding: '8px 10px',
+      borderRadius: '10px',
+      border: '1px solid var(--dsw-alias-border-subtle, rgba(15, 23, 42, 0.09))',
+      background: 'var(--dsw-alias-bg-base, #ffffff)',
+    }
+
+    const questionStyle = {
+      fontSize: '13px',
+      fontWeight: 600,
+      lineHeight: 1.5,
+      wordBreak: 'break-word',
+    }
+
+    const answerStyle = {
+      fontSize: '13px',
+      lineHeight: 1.7,
+      color: 'var(--dsw-alias-text-secondary, #3f4654)',
+      whiteSpace: 'pre-wrap',
+      wordBreak: 'break-word',
+    }
+
+    const hintStyle = {
+      color: 'var(--dsw-alias-text-tertiary, #6b7280)',
+      fontSize: '11px',
+      lineHeight: 1.4,
+      whiteSpace: 'nowrap',
+      overflow: 'hidden',
+      textOverflow: 'ellipsis',
+    }
+
+    const iconButtonStyle = {
       appearance: 'none',
-      border: '1px solid var(--dsw-alias-border-subtle, rgba(15, 23, 42, 0.14))',
+      border: 'none',
       background: 'transparent',
-      color: 'inherit',
-      borderRadius: '8px',
-      padding: '3px 10px',
-      font: 'inherit',
+      color: 'var(--dsw-alias-text-tertiary, #6b7280)',
+      borderRadius: '6px',
+      width: '20px',
+      height: '20px',
+      lineHeight: '16px',
+      padding: 0,
+      fontSize: '13px',
       cursor: 'pointer',
     }
 
-    const primaryStyle = {
-      ...buttonStyle,
+    const sendStyle = {
+      appearance: 'none',
       border: '1px solid transparent',
+      borderRadius: '8px',
+      padding: '4px 12px',
+      font: 'inherit',
+      fontSize: '12px',
+      fontWeight: 600,
+      cursor: 'pointer',
       background: 'var(--dsw-alias-accent, #3b6ef6)',
       color: 'var(--dsw-alias-text-on-accent, #ffffff)',
     }
 
-    const mutedStyle = {
-      color: 'var(--dsw-alias-text-tertiary, #6b7280)',
-      fontSize: '11px',
+    /** Animations, hover/focus states and scrollbar styling for the window. */
+    const STYLE_ID = 'dsh-aside-ask-style'
+    const CSS = `
+      @keyframes dsh-aside-ask-in { from { opacity: 0; transform: translateY(6px) } to { opacity: 1; transform: none } }
+      @keyframes dsh-aside-ask-fade { from { opacity: 0 } to { opacity: 1 } }
+      @keyframes dsh-aside-ask-dot { 0%, 80%, 100% { opacity: 0.25 } 40% { opacity: 1 } }
+      [data-aside-ask="stack"] { animation: dsh-aside-ask-in 120ms ease-out both }
+      [data-aside-ask="stack"][data-aside-ask-dragging] { animation: none; transition: none }
+      [data-aside-ask="thread"] { animation: dsh-aside-ask-fade 140ms ease-out both }
+      [data-aside-ask="round"] { animation: dsh-aside-ask-in 140ms ease-out both }
+      [data-aside-ask="body"] { scrollbar-width: thin }
+      [data-aside-ask="body"]::-webkit-scrollbar { width: 8px }
+      [data-aside-ask="body"]::-webkit-scrollbar-track { background: transparent }
+      [data-aside-ask="body"]::-webkit-scrollbar-thumb {
+        background: var(--dsw-alias-border-l3, rgba(15, 23, 42, 0.18));
+        border-radius: 999px;
+        border: 2px solid transparent;
+        background-clip: padding-box;
+      }
+      [data-aside-ask="icon"]:hover { background: var(--dsw-alias-bg-hover, rgba(15, 23, 42, 0.06)) }
+      [data-aside-ask="icon"]:focus-visible { outline: 2px solid var(--dsw-alias-accent, #3b6ef6); outline-offset: 1px }
+      [data-aside-ask="send"]:hover:not(:disabled) { filter: brightness(1.06) }
+      [data-aside-ask="send"]:active:not(:disabled) { transform: translateY(1px) }
+      [data-aside-ask="send"]:disabled { opacity: 0.55; cursor: default }
+      [data-aside-ask="send"]:focus-visible { outline: 2px solid var(--dsw-alias-accent, #3b6ef6); outline-offset: 2px }
+      [data-aside-ask="copy"] { opacity: 0; transition: opacity 120ms ease-out }
+      [data-aside-ask="round"]:hover [data-aside-ask="copy"],
+      [data-aside-ask="copy"]:focus-visible { opacity: 1 }
+      [data-aside-ask="dots"] span { animation: dsh-aside-ask-dot 1.2s infinite ease-in-out }
+      [data-aside-ask="dots"] span:nth-child(2) { animation-delay: 0.15s }
+      [data-aside-ask="dots"] span:nth-child(3) { animation-delay: 0.3s }
+      [data-aside-ask="input"]::placeholder { color: var(--dsw-alias-text-tertiary, #6b7280) }
+      [data-aside-ask="input"]:focus-visible {
+        border-color: var(--dsw-alias-accent, #3b6ef6);
+        box-shadow: 0 0 0 2px var(--dsw-alias-accent-soft, rgba(59, 110, 246, 0.18));
+      }
+      @media (prefers-reduced-motion: reduce) {
+        [data-aside-ask="stack"], [data-aside-ask="thread"], [data-aside-ask="round"] { animation: none }
+        [data-aside-ask="dots"] span { animation: none; opacity: 0.6 }
+      }
+    `
+
+    /** @returns the style element, mounted once inside the window. */
+    function StyleOnce() {
+      return h('style', { 'data-aside-ask': 'style' }, CSS)
     }
 
     /**
-     * The composer that replaces the native context menu for a selection.
-     * @returns the composer element, or null while closed.
+     * Keep the scroll area pinned to the newest round while the user is already
+     * at the bottom; scrolling up to read is never yanked away.
+     * @param ref - Scroll container.
+     * @param token - Value that changes whenever content grows.
      */
-    function Composer({ t, drag }) {
+    function useStickToBottom(ref, token) {
+      const stick = React.useRef(true)
+      React.useEffect(() => {
+        const el = ref.current
+        if (el === null) return
+        const onScroll = () => {
+          stick.current = el.scrollHeight - el.scrollTop - el.clientHeight < 24
+        }
+        el.addEventListener('scroll', onScroll, { passive: true })
+        return () => el.removeEventListener('scroll', onScroll)
+      }, [ref])
+      React.useEffect(() => {
+        const el = ref.current
+        if (el === null || !stick.current) return
+        el.scrollTop = el.scrollHeight
+      }, [ref, token])
+    }
+
+    /**
+     * One question and its answer.
+     * @returns the round element.
+     */
+    function Round({ round, t }) {
+      const [copied, setCopied] = React.useState(false)
+      const copy = async () => {
+        try {
+          await navigator.clipboard.writeText(round.answer)
+          setCopied(true)
+          window.setTimeout(() => setCopied(false), 1200)
+        } catch { /* clipboard access denied */ }
+      }
+      const asking = round.status === 'asking'
+      return h('div', { style: roundStyle, 'data-aside-ask': 'round', 'data-state': round.status },
+        h('div', { style: { display: 'flex', alignItems: 'flex-start', gap: '8px' } },
+          h('div', { style: { ...questionStyle, flex: '1', minWidth: 0 } }, round.question),
+          round.status === 'done' && round.answer !== ''
+            ? h('button', {
+              type: 'button',
+              style: iconButtonStyle,
+              'data-aside-ask': 'copy',
+              'aria-label': t('action.copy'),
+              title: t('action.copy'),
+              onClick: copy,
+            }, copied ? '✓' : '⧉')
+            : null,
+        ),
+        asking
+          ? h('div', { style: { display: 'flex', alignItems: 'center', gap: '6px', ...hintStyle } },
+            h('span', { style: { display: 'inline-flex', gap: '3px' }, 'data-aside-ask': 'dots' },
+              h('span', null, '●'), h('span', null, '●'), h('span', null, '●')),
+            h('span', null, t('status.asking')))
+          : round.status === 'error'
+            ? h('div', { style: { ...answerStyle, color: 'var(--dsw-alias-text-danger, #b42318)' } },
+              round.error === '' ? t('status.failed') : `${t('status.failed')}：${round.error}`)
+            : h('div', { style: answerStyle }, round.answer),
+      )
+    }
+
+    /**
+     * One quoted passage and every round asked about it.
+     * @returns the thread element.
+     */
+    function Thread({ thread, t }) {
+      return h('div', { style: threadStyle, 'data-aside-ask': 'thread' },
+        h('blockquote', { style: quoteStyle, title: thread.quote }, thread.quote),
+        thread.rounds.map(round => h(Round, { key: round.id, round, t })),
+      )
+    }
+
+    /**
+     * The input row. Stays mounted for as long as the window is open, so the
+     * next question can be typed without touching the mouse again.
+     * @returns the composer element.
+     */
+    function Composer({ t }) {
       const state = useStore()
-      const composer = state.composer
-      const [question, setQuestion] = React.useState('')
-      const [busy, setBusy] = React.useState(false)
+      const active = state.active()
+      const busy = state.busy()
+      const [draft, setDraft] = React.useState('')
       const inputRef = React.useRef(null)
 
       React.useEffect(() => {
-        setQuestion('')
-        setBusy(false)
         inputRef.current?.focus()
-      }, [composer?.key])
+      }, [state.threads.length])
 
-      if (composer === null || composer === undefined) return null
+      if (active === null) return null
 
       const submit = () => {
-        const text = question.trim()
+        const text = draft.trim()
         if (text === '' || busy) return
-        setBusy(true)
-        store.ask(composer.sessionId, composer.quote, text)
+        setDraft('')
+        store.ask(active.id, text)
+        inputRef.current?.focus()
       }
 
       const onKeyDown = (event) => {
-        if (event.key === 'Escape') {
-          event.preventDefault()
-          store.close()
-          return
-        }
+        // 输入法候选还没确认时，Enter/Ctrl+Enter 属于组字，不是发送
+        if (event.isComposing === true || event.nativeEvent?.isComposing === true || event.keyCode === 229) return
         if (event.key === 'Enter' && (event.metaKey || event.ctrlKey)) {
           event.preventDefault()
           submit()
         }
       }
 
-      return h('div', {
-        style: { ...panel, gap: '6px', flex: '0 0 auto' },
-        'data-aside-ask': 'composer',
-      },
-        h('div', {
-          ...headerProps(drag),
-          title: `${t('title')} v${VERSION} — ${t('drag.hint')}`,
-        },
-          h('span', { style: { ...mutedStyle, flex: '0 0 auto', lineHeight: 1 } }, t('drag.grip')),
-          h('strong', { style: { fontSize: '12px', letterSpacing: '0.02em', flex: '0 0 auto' } }, t('title')),
-          h('span', { style: { ...mutedStyle, flex: '1' } }, t('compose.quoted')),
-          h('button', {
-            type: 'button',
-            style: mutedStyle,
-            'aria-label': t('action.cancel'),
-            onClick: () => store.close(),
-          }, '×'),
-        ),
-        h('blockquote', { style: quoteStyle }, composer.quote),
+      const placeholder = active.rounds.length === 0 ? t('compose.first') : t('compose.hint')
+      return h('div', { style: composerStyle, 'data-aside-ask': 'composer' },
         h('textarea', {
           ref: inputRef,
-          value: question,
+          value: draft,
           rows: 2,
-          placeholder: t('compose.hint'),
+          placeholder,
           spellCheck: false,
-          onChange: event => setQuestion(event.target.value),
+          'data-aside-ask': 'input',
+          onChange: event => setDraft(event.target.value),
           onKeyDown,
           style: {
             width: '100%',
-            resize: 'vertical',
-            minHeight: '48px',
+            resize: 'none',
+            minHeight: '40px',
+            maxHeight: '120px',
             boxSizing: 'border-box',
-            padding: '6px 8px',
-            borderRadius: '8px',
+            padding: '7px 9px',
+            borderRadius: '9px',
             border: '1px solid var(--dsw-alias-border-subtle, rgba(15, 23, 42, 0.16))',
             background: 'var(--dsw-alias-bg-base, #ffffff)',
             color: 'inherit',
             font: 'inherit',
+            lineHeight: 1.55,
             outline: 'none',
+            transition: 'border-color 120ms ease-out, box-shadow 120ms ease-out',
           },
         }),
         h('div', { style: { display: 'flex', alignItems: 'center', gap: '8px' } },
-          h('span', { style: { ...mutedStyle, flex: '1' } }, t('note.recorded')),
-          h('button', { type: 'button', style: buttonStyle, onClick: () => store.close() }, t('action.cancel')),
+          h('span', { style: { ...hintStyle, flex: '1' } }, t('compose.recorded')),
           h('button', {
             type: 'button',
-            style: { ...primaryStyle, opacity: question.trim() === '' || busy ? 0.55 : 1 },
-            disabled: question.trim() === '' || busy,
+            'data-aside-ask': 'send',
+            style: sendStyle,
+            disabled: busy || draft.trim() === '',
             onClick: submit,
           }, t('action.ask')),
         ),
@@ -572,72 +756,22 @@ window.__ModuleLoader__.load({
     }
 
     /**
-     * One side conversation card.
-     * @returns the card element.
-     */
-    function Card({ item, t, drag }) {
-      const [copied, setCopied] = React.useState(false)
-      const copy = async () => {
-        try {
-          await navigator.clipboard.writeText(item.text)
-          setCopied(true)
-          setTimeout(() => setCopied(false), 1200)
-        } catch { /* clipboard access denied */ }
-      }
-      const body = item.status === 'asking'
-        ? h('div', { style: mutedStyle }, t('status.asking'))
-        : item.status === 'error'
-          ? h('div', { style: { color: 'var(--dsw-alias-text-danger, #b42318)' } },
-            item.error === '' ? t('status.failed') : `${t('status.failed')}：${item.error}`)
-          : h('div', { style: { whiteSpace: 'pre-wrap', wordBreak: 'break-word' } }, item.text)
-
-      return h('div', {
-        style: { ...panel, maxHeight: 'none', flex: '0 0 auto' },
-        'data-aside-ask': 'card',
-      },
-        h('div', {
-          ...headerProps(drag),
-          title: `${t('title')} v${VERSION} — ${t('drag.hint')}`,
-        },
-          h('span', { style: { ...mutedStyle, flex: '0 0 auto', lineHeight: 1 } }, t('drag.grip')),
-          h('strong', { style: { fontSize: '12px', flex: '0 0 auto' } }, t('title')),
-          h('span', {
-            style: {
-              ...mutedStyle,
-              flex: '1',
-              minWidth: 0,
-              overflow: 'hidden',
-              textOverflow: 'ellipsis',
-              whiteSpace: 'nowrap',
-            },
-          }, item.question),
-          item.status === 'done'
-            ? h('button', { type: 'button', style: mutedStyle, onClick: copy }, copied ? '✓' : t('action.copy'))
-            : null,
-          h('button', {
-            type: 'button',
-            style: mutedStyle,
-            'aria-label': t('action.close'),
-            onClick: () => store.dismissItem(item.id),
-          }, '×'),
-        ),
-        h('blockquote', { style: { ...quoteStyle, WebkitLineClamp: 2 } }, item.quote),
-        body,
-      )
-    }
-
-    /**
-     * Frame-wide overlay: the composer plus the recent side conversations.
-     * @returns the overlay element, or null when there is nothing to show.
+     * Frame-wide overlay: the window header, the accumulating rounds and the
+     * input row.
+     * @returns the window element, or null when it is closed.
      */
     function Overlay({ t }) {
       const state = useStore()
       const stackRef = React.useRef(null)
+      const bodyRef = React.useRef(null)
       const drag = useDrag(stackRef)
-      const empty = state.composer === null && state.items.length === 0
+      const open = state.threads.length > 0
+      const rounds = state.threads.reduce((total, thread) => total + thread.rounds.length, 0)
+      const lastRound = rounds
+      useStickToBottom(bodyRef, `${state.threads.length}:${lastRound}`)
 
-      // A dragged stack keeps its own offset; growing content must not carry it
-      // past the viewport edge, and a window resize must not strand it outside.
+      // A dragged window keeps its own offset; growing content must not carry it
+      // past the viewport edge, and a resize must not strand it outside.
       React.useEffect(() => {
         const el = stackRef.current
         if (el === null) return
@@ -656,28 +790,48 @@ window.__ModuleLoader__.load({
           if (observer !== null) observer.disconnect()
           window.removeEventListener('resize', settle)
         }
-      }, [empty, state.items.length, state.composer?.key])
+      }, [open, rounds, state.threads.length])
 
-      if (empty) return null
-      const placed = state.position === null ? card : {
-        ...card,
+      if (!open) return null
+      const placed = state.position === null ? stackStyle : {
+        ...stackStyle,
         left: `${state.position.left}px`,
         top: `${state.position.top}px`,
         right: 'auto',
         bottom: 'auto',
       }
-      const cards = state.items.length === 0
-        ? null
-        : h('div', { style: cardsWrap, 'data-aside-ask': 'cards' },
-          state.items.map(item => h(Card, { key: item.id, item, t, drag })))
+      const summary = state.threads.length > 1
+        ? t('threads.many', { count: state.threads.length })
+        : (rounds === 0 ? '' : (rounds === 1 ? t('rounds.one') : t('rounds.many', { count: rounds })))
       return h('div', {
         ref: stackRef,
         style: placed,
         'data-aside-ask': 'stack',
         'data-aside-ask-version': VERSION,
       },
-        cards,
-        h(Composer, { t, drag }),
+        h(StyleOnce),
+        h('div', {
+          ...drag.handleProps,
+          style: { ...headerStyle, ...drag.handleProps.style },
+          'data-aside-ask': 'header',
+          title: `${t('title')} v${VERSION} — ${t('drag.hint')}`,
+        },
+          h('span', { style: { ...hintStyle, flex: '0 0 auto' } }, t('drag.grip')),
+          h('strong', { style: { fontSize: '12px', fontWeight: 600, flex: '0 0 auto' } }, t('title')),
+          h('span', { style: { ...hintStyle, flex: '1', textAlign: 'right' } }, summary),
+          h('button', {
+            type: 'button',
+            'data-aside-ask': 'icon',
+            style: iconButtonStyle,
+            'aria-label': t('action.close'),
+            title: t('action.close'),
+            onClick: () => store.close(),
+          }, '×'),
+        ),
+        h('div', { ref: bodyRef, style: bodyStyle, 'data-aside-ask': 'body' },
+          state.threads.map(thread => h(Thread, { key: thread.id, thread, t })),
+        ),
+        h(Composer, { t }),
       )
     }
 
@@ -685,7 +839,7 @@ window.__ModuleLoader__.load({
      * Read the current document selection when the chat did not classify the
      * right-click point as inside it — the same gesture, but the point landed a
      * pixel outside the highlight. The selection still has to live inside a chat
-     * text source, so right-clicks anywhere else never open the composer.
+     * text source, so right-clicks anywhere else never open the window.
      * @returns the selected text, or null when there is nothing usable.
      */
     function selectionFallback() {
