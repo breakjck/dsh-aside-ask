@@ -6,12 +6,9 @@
 
 对话进行到一半，看到一句想追问的话——直接问，主对话就被推向新话题了；不问，又怕漏掉。旁问给这种情况留一个出口：把那段话圈出来，在旁边问一句小的，问完继续原来的事。
 
-``
-主对话 ────●──────────────────────●──────────
-            │ 选中一段              │ 下次开口时带上
-            └──● 旁支子对话 ──●     │ 一条折叠记录
-                 （fork）   └── 答案 ┘
-``
+![旁问流程](docs/aside-ask-flow.svg)
+
+*选中一段 → 右键 → 旁支窗口；答完可以在同一窗口继续追问。答案是旁支给的，主对话只在你下次开口时收到一条折叠记录。*
 
 ## 效果
 
@@ -43,14 +40,14 @@
 
 答完之后，主对话**下一次真正发请求时**才会收到一条折叠记录（圈出的内容、问题、答案），追加进上下文、也能被 KV 缓存复用，但不会唤醒空闲的主 agent、不制造多余的一轮输出。记录长这样：
 
-``
+```
 [旁问] 用户在主对话里圈出一段内容，另开了一条旁支问了一个小问题，已经答完。
 这条只是记录：不必回应它，也不要据此改变当前任务；和正在做的事相关时可以作为参考。
 
 圈出的内容：……
 问题：……
 旁支回答：……
-``
+```
 
 细节见 [`docs/DETAIL.md`](docs/DETAIL.md)。
 
@@ -66,26 +63,26 @@
 
 **1) 克隆到你喜欢的位置**
 
-``powershell
+```powershell
 git clone https://github.com/breakjck/dsh-aside-ask.git
 cd dsh-aside-ask
-``
+```
 
 **2) 让 DSH 里安装这个 bundle**
 
 DSH 的插件管理走 agent 的 `plugin_manager`。新开一个会话，把下面这句连同你的实际路径粘给它：
 
-``text
+```text
 用 plugin_manager 把下面这个目录作为插件 bundle 安装：<你克隆下来的目录，例如 D:\code\dsh-aside-ask>
 （action 用 install_bundle，target 填这个绝对路径）
-``
+```
 
 装成功后应该看到类似输出：
 
-``
+```
 + dsh-aside-ask 0.3.0 <- D:\code\dsh-aside-ask
 {"stage":"enable","target":"dsh-aside-ask","enabled":true,"application":"applied"}
-``
+```
 
 **3) 刷新页面**
 
@@ -95,23 +92,23 @@ DSH 的插件管理走 agent 的 `plugin_manager`。新开一个会话，把下�
 
 让 agent 执行 `plugin_manager` 的 `list_plugins`，列表里应该有：
 
-``
+```
 id: include:aside-ask    moduleName: dsh-aside-ask    enabled: true    fiberPhase: active
-``
+```
 
 `fiberPhase` 是 `active` 才算真跑起来了。也可以看自检日志（Windows）：
 
-``powershell
+```powershell
 Get-Content "$env:TEMP\dsh-aside-ask-boot.log" -Tail 3
-``
+```
 
 出现 `aside-ask host applied (pid …)` 说明宿主半已加载、依赖服务都解析到了。
 
 ### 卸载
 
-``text
+```text
 用 plugin_manager 卸载 dsh-aside-ask（action 用 remove_bundle，target 用 dsh-aside-ask）
-``
+```
 
 卸完刷新一次页面。
 
@@ -129,9 +126,9 @@ Get-Content "$env:TEMP\dsh-aside-ask-boot.log" -Tail 3
 
 还是不对劲的话，插件会在浏览器存储里留一条诊断轨迹（只记最近 40 步，不往外发）：
 
-``js
+```js
 localStorage.getItem('dsh-aside-ask:trace')
-``
+```
 
 里面有 `gesture`（右键有没有被接管、圈到多少字）、`thread.open` / `thread.reuse`（窗口开/复用）、`ask.start`（带 `history` 条数）、`ask.done` / `ask.http` / `ask.error` / `ask.threw`（请求走到哪一步、为什么失败）。
 
