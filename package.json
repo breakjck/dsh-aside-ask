@@ -2,7 +2,7 @@
   "name": "dsh-aside-ask",
   "version": "0.3.0",
   "private": true,
-  "description": "旁问：在对话记录里圈出一段，右键直接问一个小问题，答案走旁支子对话，不打断主对话。A DSH plugin for side-questions on selected text.",
+  "description": "旁问：在对话记录里选中一段右键提问，同一窗口内可连续追问，答案走旁支子对话，不打断主对话。A DSH plugin for follow-up questions on selected text.",
   "type": "module",
   "license": "MIT",
   "author": "breakjck",
@@ -21,7 +21,8 @@
     "aside",
     "subagent",
     "context-menu",
-    "selection"
+    "selection",
+    "follow-up"
   ],
   "exports": {
     ".": "./index.js",
@@ -40,11 +41,15 @@
     "LICENSE"
   ],
   "dsh": {
-    "bundle": { "patch": "./cordis.patch.yml" },
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
     "client": {
       "platform": "web",
       "immediately": true,
-      "inject": ["@deepseek-ai/dsh-client-ui-conversation"]
+      "inject": [
+        "@deepseek-ai/dsh-client-ui-conversation"
+      ]
     }
   }
 }
