@@ -25,6 +25,8 @@ window.__ModuleLoader__.load({
       'note.recorded': '答完会在你下次开口时记进主对话',
       'error.noSession': '这个会话现在不能旁问',
       'error.network': '请求失败',
+      'drag.hint': '按住这一行拖动 · 双击回到右下角',
+      'drag.grip': '⠿',
     }
     const en = {
       'title': 'Side ask',
@@ -39,17 +41,21 @@ window.__ModuleLoader__.load({
       'note.recorded': 'Will be noted to the main conversation at your next turn',
       'error.noSession': 'This conversation cannot be asked right now',
       'error.network': 'Request failed',
+      'drag.hint': 'Hold this row to drag · double-click to reset',
+      'drag.grip': '⠿',
     }
 
-    const POSITION_KEY = 'dsh-aside-ask:position'
-    /** Gap kept between the stack and the frame edges while dragging. */
+    const POSITION_KEY = 'dsh-aside-ask:position-v2'
+    /** Shown in the header tooltip, so a stale bundle is obvious at a glance. */
+    const VERSION = '0.2.1'
+    /** Gap kept between the stack and the viewport edges while dragging. */
     const EDGE = 8
     /** Size of the default bottom-right anchor. */
     const ANCHOR = { right: '16px', bottom: '88px' }
 
     /**
      * Read the remembered free position of the stack.
-     * @returns the offset inside the overlay layer, or null for the default anchor.
+     * @returns the offset inside the viewport, or null for the default anchor.
      */
     function readPosition() {
       try {
@@ -75,17 +81,32 @@ window.__ModuleLoader__.load({
     }
 
     /**
-     * Keep the stack inside the frame so a drag can never strand it off screen.
-     * @param left - Wanted offset from the frame's left edge.
-     * @param top - Wanted offset from the frame's top edge.
+     * Read the current viewport box. The overlay slot may hand us a container
+     * with no box of its own, so the stack is bounded by the window instead of
+     * by its containing block.
+     * @returns the viewport width and height.
+     */
+    function viewportBox() {
+      const root = document.documentElement
+      return {
+        width: window.innerWidth || (root ? root.clientWidth : 0) || 0,
+        height: window.innerHeight || (root ? root.clientHeight : 0) || 0,
+      }
+    }
+
+    /**
+     * Keep the stack inside the viewport so a drag can never strand it off
+     * screen or behind the shell's clipped frame.
+     * @param left - Wanted distance from the viewport's left edge.
+     * @param top - Wanted distance from the viewport's top edge.
      * @param width - Stack width.
      * @param height - Stack height.
-     * @param frame - Frame box in viewport coordinates.
      * @returns the clamped offset.
      */
-    function clampToFrame(left, top, width, height, frame) {
-      const maxLeft = Math.max(EDGE, frame.width - width - EDGE)
-      const maxTop = Math.max(EDGE, frame.height - height - EDGE)
+    function clampToViewport(left, top, width, height) {
+      const viewport = viewportBox()
+      const maxLeft = Math.max(EDGE, viewport.width - width - EDGE)
+      const maxTop = Math.max(EDGE, viewport.height - height - EDGE)
       return {
         left: Math.min(Math.max(EDGE, left), maxLeft),
         top: Math.min(Math.max(EDGE, top), maxTop),
@@ -224,36 +245,40 @@ window.__ModuleLoader__.load({
     }
 
     /**
-     * Pointer-driven repositioning of the stack. Moves are written straight to
-     * the node so the frame follows the pointer without waiting for a render;
-     * the settled offset is committed to the store on release.
+     * Pointer-driven repositioning of the stack. The stack is `fixed`, so it
+     * follows the pointer in viewport coordinates no matter which box the
+     * overlay slot hands us. Moves are written straight to the node — no React
+     * render runs in between, which used to clobber the first move — and the
+     * settled offset is committed to the store on release.
      * @param stackRef - The stack element.
-     * @returns the live dragging flag and the props to spread on a panel header.
+     * @returns the props to spread on a panel header.
      */
     function useDrag(stackRef) {
-      const [dragging, setDragging] = React.useState(false)
-      const dragRef = React.useRef(null)
+      const cleanupRef = React.useRef(null)
 
-      /** Points the node at an explicit offset, taking it off the anchor. */
-      const adopt = (el, position) => {
-        el.style.position = 'absolute'
-        el.style.left = `${position.left}px`
-        el.style.top = `${position.top}px`
-        el.style.right = 'auto'
-        el.style.bottom = 'auto'
-      }
+      React.useEffect(() => () => {
+        if (cleanupRef.current !== null) cleanupRef.current()
+      }, [])
 
       const onPointerDown = (event) => {
         if (!event.isPrimary || event.button !== 0) return
         const el = stackRef.current
-        const parent = el === null ? null : el.parentElement
-        if (el === null || parent === null) return
+        if (el === null) return
         if (event.target?.closest?.('button, a, input, textarea, select, [contenteditable="true"]') != null) return
         const box = el.getBoundingClientRect()
-        const frame = parent.getBoundingClientRect()
-        const start = { left: box.left - frame.left, top: box.top - frame.top }
-        adopt(el, start)
-        dragRef.current = {
+        const start = clampToViewport(box.left, box.top, box.width, box.height)
+        el.style.position = 'fixed'
+        el.style.left = `${start.left}px`
+        el.style.top = `${start.top}px`
+        el.style.right = 'auto'
+        el.style.bottom = 'auto'
+        el.style.cursor = 'grabbing'
+        el.setAttribute('data-aside-ask-dragging', '')
+        // Take the drag away from any live selection so the pointer stream
+        // stays ours for the whole gesture.
+        try { window.getSelection()?.removeAllRanges() } catch { /* selection unavailable */ }
+
+        const drag = {
           pointerId: event.pointerId,
           x: event.clientX,
           y: event.clientY,
@@ -261,71 +286,60 @@ window.__ModuleLoader__.load({
           top: start.top,
           width: box.width,
           height: box.height,
-          frame,
-          moved: false,
+          next: start,
         }
-        store.setPosition(start)
-        try { event.currentTarget.setPointerCapture(event.pointerId) } catch { /* capture unsupported */ }
-        event.preventDefault()
-        setDragging(true)
-      }
 
-      const onPointerMove = (event) => {
-        const drag = dragRef.current
-        if (drag === null || event.pointerId !== drag.pointerId) return
-        const dx = event.clientX - drag.x
-        const dy = event.clientY - drag.y
-        if (!drag.moved) {
-          if (Math.abs(dx) < 3 && Math.abs(dy) < 3) return
-          drag.moved = true
+        const onMove = (moveEvent) => {
+          if (moveEvent.pointerId !== drag.pointerId) return
+          const next = clampToViewport(
+            drag.left + (moveEvent.clientX - drag.x),
+            drag.top + (moveEvent.clientY - drag.y),
+            drag.width,
+            drag.height,
+          )
+          drag.next = next
+          const node = stackRef.current
+          if (node === null) return
+          node.style.left = `${next.left}px`
+          node.style.top = `${next.top}px`
+          moveEvent.preventDefault()
         }
-        const next = clampToFrame(drag.left + dx, drag.top + dy, drag.width, drag.height, drag.frame)
-        const el = stackRef.current
-        if (el === null) return
-        el.style.left = `${next.left}px`
-        el.style.top = `${next.top}px`
-        drag.next = next
-        event.preventDefault()
-      }
 
-      const finish = (event) => {
-        const drag = dragRef.current
-        if (drag === null) return
-        if (event !== undefined && event.pointerId !== drag.pointerId) return
-        dragRef.current = null
-        setDragging(false)
-        if (drag.next !== undefined) store.setPosition(drag.next)
-        if (event !== undefined) {
-          try { event.currentTarget.releasePointerCapture(drag.pointerId) } catch { /* already released */ }
+        const finish = () => {
+          window.removeEventListener('pointermove', onMove, true)
+          window.removeEventListener('pointerup', finish, true)
+          window.removeEventListener('pointercancel', finish, true)
+          window.removeEventListener('blur', finish)
+          if (cleanupRef.current === finish) cleanupRef.current = null
+          const node = stackRef.current
+          if (node !== null) {
+            node.style.cursor = ''
+            node.removeAttribute('data-aside-ask-dragging')
+          }
+          store.setPosition(drag.next)
         }
+
+        cleanupRef.current = finish
+        window.addEventListener('pointermove', onMove, true)
+        window.addEventListener('pointerup', finish, true)
+        window.addEventListener('pointercancel', finish, true)
+        window.addEventListener('blur', finish)
+        event.preventDefault()
       }
 
       /** Double-clicking a header parks the stack back in the corner. */
-      const reset = () => {
-        dragRef.current = null
-        setDragging(false)
-        const el = stackRef.current
-        if (el !== null) {
-          el.style.position = 'absolute'
-          el.style.left = 'auto'
-          el.style.top = 'auto'
-          el.style.right = ANCHOR.right
-          el.style.bottom = ANCHOR.bottom
-        }
+      const reset = (event) => {
+        if (event !== undefined) event.preventDefault()
+        if (cleanupRef.current !== null) cleanupRef.current()
         store.setPosition(null)
       }
 
       return {
-        dragging,
         handleProps: {
           onPointerDown,
-          onPointerMove,
-          onPointerUp: finish,
-          onPointerCancel: finish,
-          onLostPointerCapture: finish,
           onDoubleClick: reset,
           style: {
-            cursor: dragging ? 'grabbing' : 'grab',
+            cursor: 'grab',
             touchAction: 'none',
             userSelect: 'none',
             WebkitUserSelect: 'none',
@@ -347,11 +361,11 @@ window.__ModuleLoader__.load({
 
     /**
      * The stack itself. It starts anchored to the bottom-right corner and is
-     * `absolute` inside the shell overlay layer, so a dragged `left`/`top` is
-     * measured against the frame rather than the viewport.
+     * `fixed`, so a dragged `left`/`top` is measured against the viewport and
+     * never depends on the containing block the overlay slot creates.
      */
     const card = {
-      position: 'absolute',
+      position: 'fixed',
       right: ANCHOR.right,
       bottom: ANCHOR.bottom,
       zIndex: 60,
@@ -462,8 +476,12 @@ window.__ModuleLoader__.load({
       }
 
       return h('div', { style: { ...panel, gap: '6px' } },
-        h('div', headerProps(drag),
-          h('strong', { style: { fontSize: '12px', letterSpacing: '0.02em' } }, t('title')),
+        h('div', {
+          ...headerProps(drag),
+          title: `${t('title')} v${VERSION} — ${t('drag.hint')}`,
+        },
+          h('span', { style: { ...mutedStyle, flex: '0 0 auto', lineHeight: 1 } }, t('drag.grip')),
+          h('strong', { style: { fontSize: '12px', letterSpacing: '0.02em', flex: '0 0 auto' } }, t('title')),
           h('span', { style: { ...mutedStyle, flex: '1' } }, t('compose.quoted')),
           h('button', {
             type: 'button',
@@ -529,8 +547,12 @@ window.__ModuleLoader__.load({
           : h('div', { style: { whiteSpace: 'pre-wrap', wordBreak: 'break-word' } }, item.text)
 
       return h('div', { style: { ...panel, maxHeight: 'none' } },
-        h('div', headerProps(drag),
-          h('strong', { style: { fontSize: '12px' } }, t('title')),
+        h('div', {
+          ...headerProps(drag),
+          title: `${t('title')} v${VERSION} — ${t('drag.hint')}`,
+        },
+          h('span', { style: { ...mutedStyle, flex: '0 0 auto', lineHeight: 1 } }, t('drag.grip')),
+          h('strong', { style: { fontSize: '12px', flex: '0 0 auto' } }, t('title')),
           h('span', {
             style: {
               ...mutedStyle,
@@ -567,17 +589,15 @@ window.__ModuleLoader__.load({
       const empty = state.composer === null && state.items.length === 0
 
       // A dragged stack keeps its own offset; growing content must not carry it
-      // past the frame edge, and a window resize must not strand it outside.
+      // past the viewport edge, and a window resize must not strand it outside.
       React.useEffect(() => {
         const el = stackRef.current
         if (el === null) return
         const settle = () => {
           const current = store.position
           if (current === null) return
-          const parent = el.parentElement
-          if (parent === null) return
           const box = el.getBoundingClientRect()
-          const next = clampToFrame(current.left, current.top, box.width, box.height, parent.getBoundingClientRect())
+          const next = clampToViewport(current.left, current.top, box.width, box.height)
           if (next.left !== current.left || next.top !== current.top) store.setPosition(next)
         }
         settle()
@@ -598,7 +618,12 @@ window.__ModuleLoader__.load({
         right: 'auto',
         bottom: 'auto',
       }
-      return h('div', { ref: stackRef, style: placed, 'data-aside-ask': 'stack' },
+      return h('div', {
+        ref: stackRef,
+        style: placed,
+        'data-aside-ask': 'stack',
+        'data-aside-ask-version': VERSION,
+      },
         state.items.map(item => h(Card, { key: item.id, item, t, drag })),
         h(Composer, { t, drag }),
       )

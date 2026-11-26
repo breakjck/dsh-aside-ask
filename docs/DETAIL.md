@@ -9,7 +9,7 @@
 3. 右下角弹出旁问框，里面是圈出的那段话和一个输入框。
 4. 输入问题，`Ctrl+Enter` 或点「问」。
 5. 答案在右下角的卡片里出现；点「复制」可以拿走。
-6. 挡着内容就**按住标题栏拖动**；双击标题栏回到右下角。位置会被记住。
+6. 挡着内容就**按住标题行拖动**（最左边有个 `⠿`，鼠标移上去会变成抓手）；双击标题行回到右下角。位置会被记住。
 
 主对话不受影响：不新增轮次、不打断正在跑的任务、不会因为你在旁边问一句就换个话题。
 
@@ -35,7 +35,7 @@
 - **为什么走 pre-step 而不是 `agent.inject`**：预注入要求主会话此刻有活着的 agent，且只在下一次 pre-step 生效；`agent/pre-step` 钩子对任何后续恢复的会话都成立，主会话关掉再开也照样能收到记录。
 - **客户端怎么知道**：`ctx.uiConversation.interactions.register({ id: 'aside-ask', onInteraction })` 接管 `contextmenu` 手势。DSH 在标记了 `data-text-interaction-source` 的节点上检测手势，右键点必须落在选区的矩形内才算 `hasSelection`；此时 `request.readText()` 给出选中的文字，`request.preventDefault()` 压掉浏览器原生菜单。
 - **UI 放哪**：`shell.overlay`（整帧浮层）。不放 `conversation.chat.text-interaction` 浮层——那个 surface 的尺寸被夹在可见区内、且跟着选区走，放不下输入框和答案；放进 chat 流里又会把主对话顶开。
-- **为什么能拖、又被什么框住**：`shell.overlay` 的子元素落在 `AppFrame` 的 `.overlayLayer` 里（`position:absolute; inset:0; z-index:20; pointer-events:none`），而 `.frame` 是 `overflow:hidden` 的相对定位容器。所以位置用 `absolute` 的 `left/top` 表示（相对整帧，不是视口），并且必须夹在帧内——否则拖出边界就会被裁掉、再也拿不回来。拖动时把 `left/top` 直接写到节点上（不等 React 重渲染），松手才提交进 store 并写 `localStorage`；窗口变高（来答案、换行）时用 `ResizeObserver` 重新夹紧。
+- **为什么能拖、又被什么框住**：`shell.overlay` 插槽会给每个浮层元素套一层容器，而那层容器**没有自己的盒子尺寸**（实测 `0x0`）。所以位置不能按父容器量——第一版就是这么错的：夹取用的 `frame.width/height ≈ 0`，位置被夹成左上角 `8,8`，表现为"一按下就跳走、之后拖不动"。现在改成 `position: fixed`，按**视口**（`window.innerWidth/innerHeight`）夹取，父容器与 `AppFrame` 的 `overflow:hidden` 都不再参与计算；拖动时把 `left/top` 直接写到节点上（不等 React 重渲染，避免挂起的那次渲染把第一次移动覆盖回去），松手才提交进 store 并写 `localStorage`（键 `dsh-aside-ask:position-v2`）；指针监听从 `pointerdown` 时挂到 `window`（capture），不依赖 pointer capture，元素中途重挂也不会丢；窗口变高（来答案、换行）时用 `ResizeObserver` 重新按视口夹紧。
 - **层级说明**：覆盖层整体是 `z-index:20` 的层叠上下文，内部 `z-index:60` 只保证压过同一层里的上下文菜单 / toast；右侧抽屉的遮罩（`z-index:70`）和抽屉本身（`71`）在 `.frame` 层面，仍然盖在整个覆盖层之上——打开抽屉时旁问框会被遮住，关掉抽屉即恢复。这是 DSH 覆盖层的既定层级，插件不去改宿主的层叠关系。
 
 ## 已知限制
